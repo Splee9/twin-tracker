@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digital Twin — Spencer Lee</title>
+<meta name="description" content="A calibrated model of how one endurance athlete's body converts training into fitness and how lifestyle moves recovery. Model outputs only.">
+<style>
+:root { --bg:#fbfaf7; --fg:#1b1b1b; --muted:#6b6b6b; --line:#e2ddd3; --card:#ffffff; --accent:#b3462b; --fit:#2f6f8f; --fat:#c2652a; --form:#3f7d4e; --grid:#eee9e0; }
+@media (prefers-color-scheme: dark) { :root { --bg:#141412; --fg:#ebe7df; --muted:#a09a8e; --line:#2c2a25; --card:#1c1b18; --accent:#e07a5f; --fit:#7fb3d5; --fat:#e8a06a; --form:#8ccf9a; --grid:#242320; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, "Inter", system-ui, sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 28px 20px 60px; }
+h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 17px; margin: 32px 0 8px; }
+p.lede { color: var(--muted); margin: 0 0 18px; max-width: 70ch; }
+.tiles { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:10px; margin: 16px 0; }
+.tile { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+.tile .k { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+.tile .v { font-size:22px; font-variant-numeric: tabular-nums; }
+.tile .s { font-size:12px; color:var(--muted); }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; overflow-x:auto; }
+svg { width:100%; height:auto; display:block; }
+table { border-collapse: collapse; width:100%; font-size:13px; font-variant-numeric: tabular-nums; }
+th, td { text-align:right; padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+th:first-child, td:first-child { text-align:left; }
+.muted { color:var(--muted); } .small { font-size:12px; }
+.legend span { display:inline-block; margin-right:14px; font-size:12px; color:var(--muted); }
+.legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+.flag { border-left:3px solid var(--accent); padding:6px 10px; margin:8px 0; background:var(--card); font-size:13px; }
+footer { margin-top:40px; color:var(--muted); font-size:12px; max-width:70ch; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Digital Twin</h1>
+  <p class="lede">A calibrated, continuously re-fit model of one endurance athlete: how training converts into fitness (a Banister impulse-response model on eight seasons of runs and rides) and which signals move recovery (a ridge model on ~700 nights). Numpy only, no fine-tuned LLM. Everything on this page is a model output; no raw physiology, nutrition or lifestyle row leaves the machine.</p>
+  <div id="tiles" class="tiles"></div>
+
+  <h2>Fitness, fatigue, form — weekly means (VDOT units)</h2>
+  <div class="card"><div class="legend"><span><i style="background:var(--fit)"></i>fitness</span><span><i style="background:var(--fat)"></i>fatigue</span><span><i style="background:var(--form)"></i>form = fitness − fatigue</span></div><div id="curve"></div></div>
+  <div id="flags"></div>
+
+  <h2>Observed vs fitted pseudo-tests — weekly means</h2>
+  <p class="muted small">Three label types on one VDOT-equivalent scale: race results, threshold pace at a fixed heart rate, and flat easy-run efficiency. Dots are weekly means of observations; the line is the model.</p>
+  <div class="card"><div id="forecast"></div></div>
+
+  <h2>Model selection — PRESS over the time-constant grid</h2>
+  <p class="muted small">Leave-one-out prediction error per observation for every (τ<sub>fitness</sub>, τ<sub>fatigue</sub>) pair. A flat valley means the taus are not identified by these labels; the fixed 42/7 prior is shown beside the free fit.</p>
+  <div class="card"><div id="surface"></div></div>
+
+  <h2>Walk-forward backtest by build</h2>
+  <p class="muted small">Every engine is fit strictly on data before a build starts, then scored on that build's pseudo-tests and its race. Race error in minutes at marathon distance.</p>
+  <div class="card"><div id="backtest"></div></div>
+
+  <h2>Recovery — what moves tomorrow's HRV, RHR and sleep score</h2>
+  <p class="muted small">Standardized ridge coefficients (target in z-units per one SD of the feature) with 80% bootstrap intervals, rolling-origin cross-validated. Skill is the RMSE improvement over "tomorrow = today".</p>
+  <div class="card"><div id="recovery"></div></div>
+
+  <h2>Check-in adherence</h2>
+  <p class="muted small">Days per week the athlete answered the one-line Discord check-in; lifestyle covariates enter the recovery model once sixty answered days exist.</p>
+  <div class="card"><div id="adherence"></div></div>
+
+  <footer id="foot"></footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const f1 = x => x == null || isNaN(x) ? '—' : (+x).toFixed(1);
+const f2 = x => x == null || isNaN(x) ? '—' : (+x).toFixed(2);
+const fmtTime = s => { if (s == null) return '—'; const h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = Math.round(s%60); return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`; };
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function lineChart(el, series, opts = {}) {
+  const W = 960, H = opts.height || 300, P = {l: 44, r: 12, t: 12, b: 28};
+  const xs = series[0].points.map(p => p.x);
+  const all = series.flatMap(s => s.points.map(p => p.y)).filter(v => v != null && isFinite(v));
+  let lo = Math.min(...all), hi = Math.max(...all); if (opts.zero) lo = Math.min(lo, 0); const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const x = i => P.l + (W - P.l - P.r) * i / Math.max(1, xs.length - 1);
+  const y = v => P.t + (H - P.t - P.b) * (1 - (v - lo) / (hi - lo));
+  let g = '';
+  const ticks = 5;
+  for (let k = 0; k <= ticks; k++) { const v = lo + (hi - lo) * k / ticks; g += `<line x1="${P.l}" x2="${W-P.r}" y1="${y(v)}" y2="${y(v)}" stroke="${css('--grid')}"/><text x="${P.l-6}" y="${y(v)+4}" font-size="11" text-anchor="end" fill="${css('--muted')}">${v.toFixed(opts.dec ?? 0)}</text>`; }
+  const step = Math.max(1, Math.floor(xs.length / 8));
+  xs.forEach((d, i) => { if (i % step === 0) g += `<text x="${x(i)}" y="${H-8}" font-size="11" text-anchor="middle" fill="${css('--muted')}">${d.slice(0,7)}</text>`; });
+  for (const s of series) {
+    if (s.dots) {
+      g += s.points.map((p, i) => p.y == null ? '' : `<circle cx="${x(i)}" cy="${y(p.y)}" r="2.6" fill="${s.color}" opacity=".7"/>`).join('');
+    } else {
+      const d = s.points.map((p, i) => p.y == null ? null : `${x(i).toFixed(1)},${y(p.y).toFixed(1)}`).filter(Boolean);
+      g += `<polyline fill="none" stroke="${s.color}" stroke-width="${s.width || 1.8}" points="${d.join(' ')}"/>`;
+    }
+  }
+  if (opts.zero) g += `<line x1="${P.l}" x2="${W-P.r}" y1="${y(0)}" y2="${y(0)}" stroke="${css('--line')}" stroke-dasharray="3 3"/>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">${g}</svg>`;
+}
+
+fetch('src/data.json').then(r => r.json()).then(d => {
+  const b = d.banister, c = b.current;
+  $('tiles').innerHTML = [
+    ['Fitness now (VDOT-eq)', f1(c.vdot_now), `marathon-equivalent ${fmtTime(c.marathon_now)}`],
+    ['Form', f1(c.form), `fitness ${f1(c.fitness)} · fatigue ${f1(c.fatigue)}`],
+    ['τ fitness / τ fatigue', `${f1(b.free.tau1)} / ${f1(b.free.tau2)} d`, `80% CI ${b.ci80.tau1 ? b.ci80.tau1.map(Math.round).join('–') : '—'} / ${b.ci80.tau2 ? b.ci80.tau2.map(Math.round).join('–') : '—'}`],
+    ['Observations', Object.values(d.meta.n_obs).reduce((a, x) => a + x, 0), Object.entries(d.meta.n_obs).map(([k, v]) => `${k} ${v}`).join(' · ')],
+    ['Race-scale error', b.interval80_by_type.race ? `±${f1((b.interval80_by_type.race[1]-b.interval80_by_type.race[0])/2)} VDOT` : '—', '80% interval on race observations'],
+    ['As of', d.meta.as_of, d.meta.model_version],
+  ].map(([k, v, s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
+
+  lineChart($('curve'), [
+    {points: b.curve_weekly.map(w => ({x: w.week, y: w.fitness})), color: css('--fit')},
+    {points: b.curve_weekly.map(w => ({x: w.week, y: w.fatigue})), color: css('--fat')},
+    {points: b.curve_weekly.map(w => ({x: w.week, y: w.form})), color: css('--form'), width: 2.4},
+  ], {zero: true, dec: 1});
+  $('flags').innerHTML = (b.free.flags || []).map(f => `<div class="flag">${f}</div>`).join('');
+
+  const weeks = [...new Set(d.forecast_weekly.map(r => r.week))].sort();
+  const byType = t => Object.fromEntries(d.forecast_weekly.filter(r => r.type === t).map(r => [r.week, r]));
+  const ef = byType('ef'), thr = byType('thr'), race = byType('race');
+  const fitted = weeks.map(w => ({x: w, y: (ef[w] || thr[w] || race[w] || {}).yhat ?? null}));
+  lineChart($('forecast'), [
+    {points: weeks.map(w => ({x: w, y: ef[w]?.y ?? null})), color: css('--fit'), dots: true},
+    {points: weeks.map(w => ({x: w, y: thr[w]?.y ?? null})), color: css('--fat'), dots: true},
+    {points: weeks.map(w => ({x: w, y: race[w]?.y ?? null})), color: css('--accent'), dots: true},
+    {points: fitted, color: css('--fg'), width: 1.4},
+  ], {dec: 0});
+
+  // PRESS surface as a grid heatmap
+  const t1s = [...new Set(b.surface.map(s => s[0]))].sort((a, z) => a - z), t2s = [...new Set(b.surface.map(s => s[1]))].sort((a, z) => a - z);
+  const vals = b.surface.map(s => s[2]), vmin = Math.min(...vals), vmax = Math.min(Math.max(...vals), vmin * 1.25);
+  const cw = 34, ch = 22, L = 46, T = 10;
+  let g = '';
+  for (const s of b.surface) {
+    const i = t1s.indexOf(s[0]), j = t2s.indexOf(s[1]); const q = Math.max(0, Math.min(1, (s[2] - vmin) / (vmax - vmin)));
+    const col = `hsl(${(1 - q) * 120 + 10} 55% ${45 + q * 30}%)`;
+    g += `<rect x="${L + i*cw}" y="${T + j*ch}" width="${cw-1}" height="${ch-1}" fill="${col}"><title>τ1 ${s[0]} · τ2 ${s[1]} · PRESS/obs ${s[2].toFixed(3)}</title></rect>`;
+  }
+  t1s.forEach((v, i) => g += `<text x="${L + i*cw + cw/2}" y="${T + t2s.length*ch + 14}" font-size="10" text-anchor="middle" fill="${css('--muted')}">${v}</text>`);
+  t2s.forEach((v, j) => g += `<text x="${L - 6}" y="${T + j*ch + 15}" font-size="10" text-anchor="end" fill="${css('--muted')}">${v}</text>`);
+  const mark = (t1, t2, label, color) => { const i = t1s.indexOf(t1), j = t2s.indexOf(t2); if (i < 0 || j < 0) return ''; return `<rect x="${L + i*cw}" y="${T + j*ch}" width="${cw-1}" height="${ch-1}" fill="none" stroke="${color}" stroke-width="2.5"><title>${label}</title></rect>`; };
+  g += mark(42, 7, 'Morton prior 42/7', css('--fg')) + mark(b.free.tau1, b.free.tau2, 'free fit', css('--accent'));
+  $('surface').innerHTML = `<svg viewBox="0 0 ${L + t1s.length*cw + 10} ${T + t2s.length*ch + 24}">${g}</svg><div class="small muted">x: τ fitness (days) · y: τ fatigue (days) · green = lower PRESS · outlined: free fit (accent), 42/7 prior (foreground)</div>`;
+
+  if (d.backtest) {
+    const eng = Object.entries(d.backtest.summary).sort((a, z) => (a[1].race_rmse_vdot ?? 9) - (z[1].race_rmse_vdot ?? 9));
+    let h = `<table><thead><tr><th>engine</th><th>builds</th><th>pseudo-test RMSE (VDOT)</th><th>race RMSE (VDOT)</th><th>race MAE (min)</th><th>80% coverage</th></tr></thead><tbody>`;
+    h += eng.map(([k, v]) => `<tr><td>${k}</td><td>${v.builds}</td><td>${f2(v.rmse_pseudo)}</td><td>${f2(v.race_rmse_vdot)}</td><td>${f1(v.race_mae_min)}</td><td>${v.coverage80 == null ? '—' : (100*v.coverage80).toFixed(0)+'%'}</td></tr>`).join('');
+    h += `</tbody></table><details class="small" style="margin-top:8px"><summary class="muted">per build</summary><table><thead><tr><th>build</th><th>engine</th><th>n test</th><th>RMSE</th><th>race</th><th>pred</th><th>err (min)</th></tr></thead><tbody>`;
+    h += d.backtest.rows.map(r => `<tr><td>${r.label || r.build}</td><td>${r.engine}</td><td>${r.n_test ?? '—'}</td><td>${f2(r.rmse_vdot)}</td><td>${f1(r.race_vdot)}</td><td>${f1(r.race_pred)}</td><td>${f1(r.race_err_min)}</td></tr>`).join('');
+    $('backtest').innerHTML = h + '</tbody></table></details>';
+  }
+
+  if (d.recovery) {
+    let h = '';
+    for (const t of ['hrv', 'rhr', 'sleep_score']) {
+      const fitted = d.recovery.results.filter(r => r.target === t && r.status === 'fitted');
+      if (!fitted.length) continue;
+      const r = fitted[fitted.length - 1];
+      const eff = r.effects.slice(0, 8);
+      const W = 960, rowH = 22, L = 200, mid = L + (W - L - 20) / 2, scale = (W - L - 20) / 2 / Math.max(0.05, ...eff.map(e => Math.max(Math.abs(e.lo), Math.abs(e.hi))));
+      let s = `<line x1="${mid}" x2="${mid}" y1="0" y2="${eff.length*rowH}" stroke="${css('--line')}"/>`;
+      eff.forEach((e, i) => { const y = i*rowH + rowH/2; s += `<text x="${L-8}" y="${y+4}" font-size="12" text-anchor="end" fill="${css('--fg')}">${e.name}</text><line x1="${mid + e.lo*scale}" x2="${mid + e.hi*scale}" y1="${y}" y2="${y}" stroke="${css('--muted')}" stroke-width="2"/><circle cx="${mid + e.beta_z_per_sd*scale}" cy="${y}" r="4" fill="${e.beta_z_per_sd >= 0 ? css('--form') : css('--fat')}"/>`; });
+      h += `<h3 style="font-size:14px;margin:10px 0 4px">${t.replace('_',' ')} — spec <code>${r.spec}</code> · n ${r.n} · skill vs persistence ${(100*(r.cv.skill_vs_persistence||0)).toFixed(0)}% · 80% coverage ${(100*r.cv.coverage80).toFixed(0)}%</h3><svg viewBox="0 0 ${W} ${eff.length*rowH}">${s}</svg>`;
+    }
+    const waiting = d.recovery.results.filter(r => r.spec === 'full' && r.status !== 'fitted');
+    if (waiting.length) h += `<div class="flag">Lifestyle spec: ${waiting[0].status} — the Discord check-in has to accumulate answered days before alcohol, late meals, travel, illness, heat baths and stress enter the model.</div>`;
+    $('recovery').innerHTML = h;
+  }
+
+  $('adherence').innerHTML = d.adherence.length
+    ? `<table><thead><tr><th>week of</th><th>answered</th><th>extracted</th></tr></thead><tbody>${d.adherence.map(a => `<tr><td>${a.monday}</td><td>${a.asked} / 7</td><td>${a.extracted}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="muted small">No check-in weeks yet — the first ask fires the morning after go-live.</div>';
+
+  $('foot').innerHTML = `Generated ${d.meta.generated} · ${d.meta.model_version}. Method and limitations are in the accompanying writeup (architecture, tradeoffs, evals). Built from an Obsidian vault + SQLite pipeline; fits are numpy-only. Published from the vault's own sync job; this page updates when the underlying data changes.`;
+}).catch(e => { document.querySelector('main').insertAdjacentHTML('beforeend', `<div class="flag">Could not load data.json: ${e}</div>`); });
+</script>
+</body>
+</html>
