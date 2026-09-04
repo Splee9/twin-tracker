@@ -35,6 +35,7 @@ footer { margin-top:40px; color:var(--muted); font-size:12px; max-width:70ch; }
 <main>
   <h1>Digital Twin</h1>
   <p class="lede">A calibrated, continuously re-fit model of one endurance athlete: how training converts into fitness (a Banister impulse-response model on eight seasons of runs and rides) and which signals move recovery (a ridge model on ~700 nights). Numpy only, no fine-tuned LLM. Everything on this page is a model output; no raw physiology, nutrition or lifestyle row leaves the machine.</p>
+  <p class="lede"><strong>The headline forecast is the efficiency engine, not the load model.</strong> The walk-forward backtest below says so, and reporting the more sophisticated model instead of the more accurate one is the mistake the eval exists to catch.</p>
   <div id="tiles" class="tiles"></div>
 
   <h2>Fitness, fatigue, form — weekly means (VDOT units)</h2>
@@ -95,13 +96,14 @@ function lineChart(el, series, opts = {}) {
 }
 
 fetch('src/data.json').then(r => r.json()).then(d => {
-  const b = d.banister, c = b.current;
+  const b = d.banister, c = b.current, nc = d.nowcast;
   $('tiles').innerHTML = [
-    ['Fitness now (VDOT-eq)', f1(c.vdot_now), `marathon-equivalent ${fmtTime(c.marathon_now)}`],
+    nc ? ['Marathon nowcast', fmtTime(nc.marathon_s), `VDOT ${f1(nc.vdot)} · ±${f1(nc.band_vdot[1]-nc.vdot)} (${nc.engine})`]
+       : ['Fitness now (VDOT-eq)', f1(c.vdot_now), `marathon-equivalent ${fmtTime(c.marathon_now)}`],
     ['Form', f1(c.form), `fitness ${f1(c.fitness)} · fatigue ${f1(c.fatigue)}`],
     ['τ fitness / τ fatigue', `${f1(b.free.tau1)} / ${f1(b.free.tau2)} d`, `80% CI ${b.ci80.tau1 ? b.ci80.tau1.map(Math.round).join('–') : '—'} / ${b.ci80.tau2 ? b.ci80.tau2.map(Math.round).join('–') : '—'}`],
     ['Observations', Object.values(d.meta.n_obs).reduce((a, x) => a + x, 0), Object.entries(d.meta.n_obs).map(([k, v]) => `${k} ${v}`).join(' · ')],
-    ['Race-scale error', b.interval80_by_type.race ? `±${f1((b.interval80_by_type.race[1]-b.interval80_by_type.race[0])/2)} VDOT` : '—', '80% interval on race observations'],
+    ['Banister curve', f1(c.vdot_now), 'the load model — 1.5-1.9 VDOT worse on held-out races'],
     ['As of', d.meta.as_of, d.meta.model_version],
   ].map(([k, v, s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
 
