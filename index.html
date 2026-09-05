@@ -42,6 +42,22 @@ footer { margin-top:40px; color:var(--muted); font-size:12px; max-width:70ch; }
   <div class="card"><div class="legend"><span><i style="background:var(--fit)"></i>fitness</span><span><i style="background:var(--fat)"></i>fatigue</span><span><i style="background:var(--form)"></i>form = fitness − fatigue</span></div><div id="curve"></div></div>
   <div id="flags"></div>
 
+  <h2>Latent fitness — a Kalman state over efficiency, threshold and race observations</h2>
+  <p class="muted small">One VDOT-equivalent level per day, weekly means shown with a ±1 SD band. Process noise is chosen by how well the filtered state predicts races it has not seen. Dots are the races.</p>
+  <div class="card"><div id="latent"></div><div id="latentnote" class="small muted"></div></div>
+
+  <h2>Week dose-response — what a training week does to the latent state</h2>
+  <p class="muted small">Ridge on week features (volume, marathon-pace miles, threshold minutes, longest run, quality count, conditions, entering state) predicting the change in latent fitness over the week and over four weeks. Rolling-origin cross-validated. Coefficients in VDOT per SD of the feature, with 80% bootstrap intervals.</p>
+  <div class="card"><div id="dose"></div></div>
+
+  <h2>Scenario scores — candidate weeks, forward</h2>
+  <p class="muted small">Each candidate week is run through the dose model with next week's forecast conditions and the current entering state, plus the recovery model's predicted next-morning HRV path on a standard weekly template. Forecasts are logged and graded below.</p>
+  <div class="card"><div id="scenario"></div></div>
+
+  <h2>Forecasts on the record</h2>
+  <p class="muted small">Every forecast the twin committed before the fact, with the observed value once it exists. This table is the calibration record.</p>
+  <div class="card"><div id="forecasts"></div></div>
+
   <h2>Observed vs fitted pseudo-tests — weekly means</h2>
   <p class="muted small">Three label types on one VDOT-equivalent scale: race results, threshold pace at a fixed heart rate, and flat easy-run efficiency. Dots are weekly means of observations; the line is the model.</p>
   <div class="card"><div id="forecast"></div></div>
@@ -141,6 +157,38 @@ fetch('src/data.json').then(r => r.json()).then(d => {
   g += mark(42, 7, 'Morton prior 42/7', css('--fg')) + mark(b.free.tau1, b.free.tau2, 'free fit', css('--accent'));
   $('surface').innerHTML = `<svg viewBox="0 0 ${L + t1s.length*cw + 10} ${T + t2s.length*ch + 24}">${g}</svg><div class="small muted">x: τ fitness (days) · y: τ fatigue (days) · green = lower PRESS · outlined: free fit (accent), 42/7 prior (foreground)</div>`;
 
+  if (d.fitness) {
+    const wk = d.fitness.weekly;
+    lineChart($('latent'), [
+      {points: wk.map(w => ({x: w.week, y: w.fitness + w.sd})), color: css('--grid'), width: 1},
+      {points: wk.map(w => ({x: w.week, y: w.fitness - w.sd})), color: css('--grid'), width: 1},
+      {points: wk.map(w => ({x: w.week, y: w.fitness})), color: css('--fit'), width: 2.2},
+      {points: wk.map(w => { const r = d.fitness.races.find(r => r.date >= w.week && r.date < new Date(Date.parse(w.week) + 7*864e5).toISOString().slice(0,10)); return {x: w.week, y: r ? r.race_vdot : null}; }), color: css('--accent'), dots: true},
+    ], {dec: 0});
+    $('latentnote').innerHTML = `Now ${f1(d.fitness.current.fitness)} ± ${f1(d.fitness.current.sd)} VDOT-eq (marathon-equivalent ${fmtTime(d.fitness.current.marathon_s)}) · smoothed race RMSE ${f2(d.fitness.race_rmse)} · held-out race RMSE ${f2(d.fitness.heldout_race_rmse)} · q ${d.fitness.q}`;
+  }
+  if (d.dose) {
+    let h = '';
+    for (const r of d.dose.results) {
+      if (r.status !== 'fitted') { h += `<div class="small muted">${r.spec} · ${r.target}: ${r.status}</div>`; continue; }
+      const eff = r.effects.slice(0, 8), W = 960, rowH = 22, L = 200, mid = L + (W - L - 20) / 2, scale = (W - L - 20) / 2 / Math.max(0.05, ...eff.map(e => Math.max(Math.abs(e.lo), Math.abs(e.hi))));
+      let sv = `<line x1="${mid}" x2="${mid}" y1="0" y2="${eff.length*rowH}" stroke="${css('--line')}"/>`;
+      eff.forEach((e, i) => { const y = i*rowH + rowH/2; sv += `<text x="${L-8}" y="${y+4}" font-size="12" text-anchor="end" fill="${css('--fg')}">${e.name}</text><line x1="${mid + e.lo*scale}" x2="${mid + e.hi*scale}" y1="${y}" y2="${y}" stroke="${css('--muted')}" stroke-width="2"/><circle cx="${mid + e.beta_per_sd*scale}" cy="${y}" r="4" fill="${e.beta_per_sd >= 0 ? css('--form') : css('--fat')}"/>`; });
+      h += `<h3 style="font-size:14px;margin:10px 0 4px">${r.target === 'd1w' ? 'Δ over the week' : 'Δ over four weeks'} · <code>${r.spec}</code> · ${r.n_weeks} weeks · out-of-sample R² ${f2(r.cv.r2_oos)} · skill vs no-change ${(100*r.cv.skill_vs_zero).toFixed(0)}%</h3><svg viewBox="0 0 ${W} ${eff.length*rowH}">${sv}</svg>`;
+    }
+    $('dose').innerHTML = h;
+  }
+  if (d.scenario) {
+    let h = `<div class="small muted">week of ${d.scenario.monday}</div><table><thead><tr><th>candidate</th><th>Δ fitness, 1 wk</th><th>Δ fitness, 4 wk</th><th>min next-am HRV z</th><th>days below −0.8</th></tr></thead><tbody>`;
+    h += d.scenario.candidates.map(c => `<tr><td>${c.name}</td><td>${c.plan_only_d1w ? f2(c.plan_only_d1w.delta_vdot) + ' [' + f2(c.plan_only_d1w.lo) + ', ' + f2(c.plan_only_d1w.hi) + ']' : '—'}</td><td>${c.plan_only_d4w ? f2(c.plan_only_d4w.delta_vdot) : '—'}</td><td>${c.recovery ? f2(c.recovery.min_hrv_z) : '—'}</td><td>${c.recovery ? c.recovery['days_below_-0.8'] : '—'}</td></tr>`).join('');
+    $('scenario').innerHTML = h + '</tbody></table>';
+  }
+  if (d.forecasts && d.forecasts.length) {
+    const fmtv = (t, v) => v == null ? '—' : (t.startsWith('mp_pace') ? fmtTime(v).replace(/^0:/, '') : f2(v));
+    let h = `<table><thead><tr><th>made</th><th>target</th><th>engine</th><th>forecast</th><th>band</th><th>observed</th><th></th></tr></thead><tbody>`;
+    h += d.forecasts.map(f => { const hit = f.observed == null ? '' : (f.lo != null && f.observed >= f.lo && f.observed <= f.hi ? 'hit' : 'miss'); return `<tr><td>${f.made_on}</td><td>${f.target}</td><td>${f.source}</td><td>${fmtv(f.target, f.yhat)}</td><td>${f.lo == null ? '—' : fmtv(f.target, f.lo) + ' – ' + fmtv(f.target, f.hi)}</td><td>${fmtv(f.target, f.observed)}</td><td class="${hit === 'miss' ? '' : 'muted'}">${hit}</td></tr>`; }).join('');
+    $('forecasts').innerHTML = h + '</tbody></table>';
+  }
   if (d.backtest) {
     const eng = Object.entries(d.backtest.summary).sort((a, z) => (a[1].race_rmse_vdot ?? 9) - (z[1].race_rmse_vdot ?? 9));
     let h = `<table><thead><tr><th>engine</th><th>builds</th><th>pseudo-test RMSE (VDOT)</th><th>race RMSE (VDOT)</th><th>race MAE (min)</th><th>80% coverage</th></tr></thead><tbody>`;
